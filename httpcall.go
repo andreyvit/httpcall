@@ -15,66 +15,61 @@ import (
 	"time"
 )
 
-var (
-	DefaultMaxResponseLength int64         = 100 * 1024 * 1024 // 100 MB seems like a fine safety limit
-	DefaultRetryDelay        time.Duration = 500 * time.Millisecond
-)
+const DefaultMaxResponseLength int64 = 100 * 1024 * 1024 // 100 MB seems like a fine safety limit
 
-var (
-	ErrResponseTooLong = errors.New("response too long")
-)
+const DefaultRetryDelay time.Duration = 500 * time.Millisecond
 
-type (
-	Request struct {
-		Context context.Context
-		CallID  string
+var ErrResponseTooLong = errors.New("response too long")
 
-		Method                 string
-		BaseURL                string
-		Path                   string
-		PathParams             map[string]string
-		QueryParams            url.Values
-		FullURLOverride        string // for APIs using REST-style links, completely overrides BaseURL, Path and QueryParams
-		Input                  any
-		RawRequestBody         []byte
-		RequestBodyContentType string
-		Headers                http.Header
-		BasicAuth              BasicAuth
-		HTTPRequest            *http.Request
+type Request struct {
+	Context context.Context
+	CallID  string
 
-		OutputPtr         any
-		MaxResponseLength int64
+	Method                 string
+	BaseURL                string
+	Path                   string
+	PathParams             map[string]string
+	QueryParams            url.Values
+	FullURLOverride        string // for APIs using REST-style links, completely overrides BaseURL, Path and QueryParams
+	Input                  any
+	RawRequestBody         []byte
+	RequestBodyContentType string
+	Headers                http.Header
+	BasicAuth              BasicAuth
+	HTTPRequest            *http.Request
 
-		HTTPClient     *http.Client
-		MaxAttempts    int
-		RetryDelay     time.Duration
-		LastRetryDelay time.Duration
+	OutputPtr         any
+	MaxResponseLength int64
 
-		ShouldStart        func(r *Request) error
-		Started            func(r *Request)
-		ValidateOutput     func() error
-		ParseResponse      func(r *Request) error
-		ParseErrorResponse func(r *Request)
-		Failed             func(r *Request)
-		Finished           func(r *Request)
+	HTTPClient     *http.Client
+	MaxAttempts    int
+	RetryDelay     time.Duration
+	LastRetryDelay time.Duration
 
-		UserObject any
-		UserData   map[string]any
+	ShouldStart        func(r *Request) error
+	Started            func(r *Request)
+	ValidateOutput     func() error
+	ParseResponse      func(r *Request) error
+	ParseErrorResponse func(r *Request)
+	Failed             func(r *Request)
+	Finished           func(r *Request)
 
-		Attempts        int
-		HTTPResponse    *http.Response
-		RawResponseBody []byte
-		Error           *Error
-		Duration        time.Duration
+	UserObject any
+	UserData   map[string]any
 
-		initDone bool
-	}
+	Attempts        int
+	HTTPResponse    *http.Response
+	RawResponseBody []byte
+	Error           *Error
+	Duration        time.Duration
 
-	BasicAuth struct {
-		Username string
-		Password string
-	}
-)
+	initDone bool
+}
+
+type BasicAuth struct {
+	Username string
+	Password string
+}
 
 func (r *Request) Clone() *Request {
 	result := new(Request)

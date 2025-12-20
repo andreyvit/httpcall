@@ -8,33 +8,99 @@ import (
 	"unicode/utf8"
 )
 
+// ErrorCategory is an application-defined classification that can be attached
+// to an Error.
+//
+// Categories are intended for business-level routing/handling ("unsupported
+// event", "invalid credentials", "rate limited"), rather than transport-level
+// classification.
+//
+// A category is comparable by identity (pointer): you typically define package
+// globals and check them with errors.Is / Error.IsInCategory.
 type ErrorCategory struct {
+	// Name is an arbitrary identifier for the category.
+	//
+	// Categories are intended for business-level classification (as opposed to
+	// transport-level classification like "network error" or "HTTP 500").
 	Name string
 }
 
+// Error returns the category name (so categories can be treated as errors).
 func (err *ErrorCategory) Error() string {
 	return err.Name
 }
 
+// Error represents a failed Request.
+//
+// Do() returns *Error. The underlying cause is available in Cause and via
+// errors.Unwrap / errors.Is / errors.As.
+//
+// The intent is to make logging/observability easy: Error stores the request
+// identity, status code (if any), the raw response body, and flags used by
+// retry logic.
 type Error struct {
-	CallID            string
-	IsNetwork         bool
-	IsRetriable       bool
-	RetryDelay        time.Duration
-	StatusCode        int
-	Type              string
-	Path              string
-	Message           string
-	RawResponseBody   []byte
+	// CallID is copied from Request.CallID.
+	CallID string
+
+	// IsNetwork is true for errors that occurred before a valid HTTP response was
+	// received (DNS, timeouts, connection resets, etc), and for some parsing
+	// failures that heuristically look like "we didn't get the expected API
+	// response at all".
+	IsNetwork bool
+
+	// IsRetriable controls retry behavior in Do().
+	// It is set by httpcall (network errors and HTTP 5xx) but can be overridden
+	// by hooks.
+	IsRetriable bool
+
+	// RetryDelay optionally overrides the delay before the next retry attempt.
+	// If zero, Request.RetryDelay / DefaultRetryDelay is used.
+	RetryDelay time.Duration
+
+	// StatusCode is the HTTP status code, or 0 if a response was never received.
+	StatusCode int
+
+	// Type is an optional machine-friendly classification (often an API error code).
+	Type string
+
+	// Path is an optional locator for where an error occurred (for example, a JSON
+	// path inside a response).
+	Path string
+
+	// Message is an optional human-friendly summary.
+	Message string
+
+	// RawResponseBody contains the response body read by httpcall, if any.
+	RawResponseBody []byte
+
+	// PrintResponseBody controls whether Error() includes RawResponseBody inline.
+	// This is useful for logs, but should be used with care if responses might
+	// contain secrets.
 	PrintResponseBody bool
-	Cause             error
-	Category1         *ErrorCategory
-	Category2         *ErrorCategory
+
+	// Cause is the underlying error (network failure, JSON parsing error, a
+	// validation error, etc).
+	Cause error
+
+	// Category1 and Category2 are optional business-level error categories.
+	// Only two are supported to keep the type lightweight.
+	Category1 *ErrorCategory
+	Category2 *ErrorCategory
 }
 
+// Error formats the error with request identity (CallID/status) when available.
+//
+// If PrintResponseBody is true, Error may include the response body in the
+// message. See ShortError for a more compact variant.
 func (e *Error) Error() string {
 	return e.customError(true)
 }
+
+// ShortError formats the error without including request identity (CallID and
+// status code).
+//
+// This is useful in logs where the call identity is already included elsewhere
+// (for example, when logging "CallID -> ShortError()").
 func (e *Error) ShortError() string {
 	return e.customError(false)
 }
@@ -92,14 +158,19 @@ func (e *Error) customError(withIdentity bool) string {
 	return buf.String()
 }
 
+// Unwrap returns the underlying cause, enabling errors.Is / errors.As.
 func (e *Error) Unwrap() error {
 	return e.Cause
 }
 
+// IsUnprocessableEntity reports whether StatusCode is HTTP 422.
 func (e *Error) IsUnprocessableEntity() bool {
 	return e.StatusCode == http.StatusUnprocessableEntity
 }
 
+// AddCategory attaches a category to the error and returns e.
+//
+// At most two categories are supported; adding a third panics.
 func (e *Error) AddCategory(cat *ErrorCategory) *Error {
 	if cat != nil && !e.IsInCategory(cat) {
 		if e.Category1 == nil {
@@ -113,6 +184,8 @@ func (e *Error) AddCategory(cat *ErrorCategory) *Error {
 	return e
 }
 
+// Is implements a custom errors.Is behavior: comparing an Error against an
+// *ErrorCategory checks category membership.
 func (e *Error) Is(target error) bool {
 	if cat, ok := target.(*ErrorCategory); ok {
 		return e.IsInCategory(cat)
@@ -120,6 +193,7 @@ func (e *Error) Is(target error) bool {
 	return false
 }
 
+// IsInCategory reports whether this error has the specified category attached.
 func (e *Error) IsInCategory(cat *ErrorCategory) bool {
 	return cat != nil && (e.Category1 == cat || e.Category2 == cat)
 }

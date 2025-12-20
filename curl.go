@@ -6,6 +6,16 @@ import (
 	"strings"
 )
 
+// Curl returns a runnable `curl` command that mirrors this request.
+//
+// This is primarily meant for logging/debugging production issues.
+//
+// Includes request method, headers, body and URL. Uses ShellQuote for safe
+// shell escaping.Headers are emitted in a stable (sorted) order to make logs
+// diffable.
+//
+// Curl calls Init(), so it reflects the prepared HTTPRequest (including any
+// marshaled body).
 func (r *Request) Curl() string {
 	r.Init()
 
@@ -46,6 +56,10 @@ func (r *Request) Curl() string {
 	return buf.String()
 }
 
+// ShellQuote quotes a string for use as a single shell argument.
+//
+// It prefers single quotes when possible, and falls back to double quotes with
+// backslash escaping when the string contains single quotes.
 func ShellQuote(source string) string {
 	const specialChars = "\\'\"`${[|&;<>()*?! \t\n~"
 	const specialInDouble = "$\\\"!"

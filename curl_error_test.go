@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -78,6 +79,7 @@ func TestRequest_Curl_RawBodyWhenInputNil(t *testing.T) {
 func TestErrorFormattingAndCategories(t *testing.T) {
 	c1 := &ErrorCategory{Name: "cat1"}
 	c2 := &ErrorCategory{Name: "cat2"}
+	c3 := &ErrorCategory{Name: "cat3"}
 	if c1.Error() != "cat1" {
 		t.Fatalf("got %q", c1.Error())
 	}
@@ -92,10 +94,13 @@ func TestErrorFormattingAndCategories(t *testing.T) {
 		RawResponseBody:   []byte("hi"),
 		PrintResponseBody: true,
 		Cause:             errors.New("boom"),
-	}).AddCategory(c1).AddCategory(c2)
+	}).AddCategory(c1).AddCategory(c2).AddCategory(c3)
 
 	if !e.Is(c1) || !e.Is(c2) {
 		t.Fatalf("expected categories to match via errors.Is")
+	}
+	if !e.Is(c3) {
+		t.Fatalf("expected 3rd category to match via errors.Is")
 	}
 	if e.IsUnprocessableEntity() {
 		t.Fatalf("unexpected")
@@ -112,14 +117,29 @@ func TestErrorFormattingAndCategories(t *testing.T) {
 	_ = e2.Error()
 }
 
-func TestError_AddCategoryPanicsOnThird(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatalf("expected panic")
+func TestError_AddCategorySupportsMany(t *testing.T) {
+	cats := make([]*ErrorCategory, 0, 10)
+	for i := range 10 {
+		cats = append(cats, &ErrorCategory{Name: strconv.Itoa(i)})
+	}
+
+	e := &Error{}
+	e.AddCategory(nil)
+	if e.IsInCategory(nil) {
+		t.Fatalf("expected nil category to be false")
+	}
+	for _, cat := range cats {
+		e.AddCategory(cat)
+	}
+	e.AddCategory(cats[0]) // duplicate should be a no-op
+	for _, cat := range cats {
+		if !e.IsInCategory(cat) {
+			t.Fatalf("expected IsInCategory for %q", cat.Name)
 		}
-	}()
-	e := (&Error{}).AddCategory(&ErrorCategory{Name: "1"}).AddCategory(&ErrorCategory{Name: "2"})
-	_ = e.AddCategory(&ErrorCategory{Name: "3"})
+		if !errors.Is(e, cat) {
+			t.Fatalf("expected errors.Is for %q", cat.Name)
+		}
+	}
 }
 
 func TestRequest_OnShouldStartComposition(t *testing.T) {

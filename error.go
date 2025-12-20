@@ -3,6 +3,7 @@ package httpcall
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -89,10 +90,9 @@ type Error struct {
 	// validation error, etc).
 	Cause error
 
-	// Category1 and Category2 are optional business-level error categories.
-	// Only two are supported to keep the type lightweight.
-	Category1 *ErrorCategory
-	Category2 *ErrorCategory
+	category1      *ErrorCategory
+	category2      *ErrorCategory
+	moreCategories []*ErrorCategory // third and more
 }
 
 // Error formats the error with request identity (CallID/status) when available.
@@ -129,14 +129,19 @@ func (e *Error) customError(withIdentity bool) string {
 		buf.WriteString(": ")
 		buf.WriteString(e.Type)
 	}
-	if e.Category1 != nil {
+	if e.category1 != nil {
 		buf.WriteString(" <")
-		buf.WriteString(e.Category1.Name)
+		buf.WriteString(e.category1.Name)
 		buf.WriteString(">")
 	}
-	if e.Category2 != nil {
+	if e.category2 != nil {
 		buf.WriteString(" <")
-		buf.WriteString(e.Category2.Name)
+		buf.WriteString(e.category2.Name)
+		buf.WriteString(">")
+	}
+	for _, cat := range e.moreCategories {
+		buf.WriteString(" <")
+		buf.WriteString(cat.Name)
 		buf.WriteString(">")
 	}
 	if e.Message != "" {
@@ -176,17 +181,17 @@ func (e *Error) IsUnprocessableEntity() bool {
 }
 
 // AddCategory attaches a category to the error and returns e.
-//
-// At most two categories are supported; adding a third panics.
 func (e *Error) AddCategory(cat *ErrorCategory) *Error {
-	if cat != nil && !e.IsInCategory(cat) {
-		if e.Category1 == nil {
-			e.Category1 = cat
-		} else if e.Category2 == nil {
-			e.Category2 = cat
-		} else {
-			panic("only 2 categories are supported per error")
-		}
+	if cat == nil || e.IsInCategory(cat) {
+		return e
+	}
+
+	if e.category1 == nil {
+		e.category1 = cat
+	} else if e.category2 == nil {
+		e.category2 = cat
+	} else {
+		e.moreCategories = append(e.moreCategories, cat)
 	}
 	return e
 }
@@ -202,5 +207,11 @@ func (e *Error) Is(target error) bool {
 
 // IsInCategory reports whether this error has the specified category attached.
 func (e *Error) IsInCategory(cat *ErrorCategory) bool {
-	return cat != nil && (e.Category1 == cat || e.Category2 == cat)
+	if cat == nil {
+		return false
+	}
+	if e.category1 == cat || e.category2 == cat {
+		return true
+	}
+	return slices.Contains(e.moreCategories, cat)
 }

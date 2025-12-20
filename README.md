@@ -314,7 +314,6 @@ Key properties:
 
 - Categories are compared by identity (pointer), so you typically define them as package-level globals.
 - A category can be checked with `errors.Is(err, MyCategory)` (because `*httpcall.Error` implements a custom `Is` method).
-- Only two categories are supported per error (`Error.AddCategory` panics on a third), so keep them high-signal.
 
 Example:
 

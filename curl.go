@@ -2,6 +2,7 @@ package httpcall
 
 import (
 	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -15,8 +16,13 @@ func (r *Request) Curl() string {
 		buf.WriteString(" -X")
 		buf.WriteString(r.HTTPRequest.Method)
 	}
-	for k, vv := range r.HTTPRequest.Header {
-		for _, v := range vv {
+	keys := make([]string, 0, len(r.HTTPRequest.Header))
+	for k := range r.HTTPRequest.Header {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for _, v := range r.HTTPRequest.Header[k] {
 			buf.WriteString(" -H ")
 			buf.WriteString(ShellQuote(k + ": " + v))
 		}

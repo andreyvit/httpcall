@@ -47,11 +47,84 @@ Request input/output:
 - If `OutputPtr` is `*[]byte`, the response body is returned as raw bytes (no JSON parsing).
 - Otherwise, `OutputPtr` is unmarshaled from JSON response body.
 
-Retries:
+### Rate limiting and retries
 
-- Set `MaxAttempts` to enable retries (`1` means “no retries”).
-- By default, retries happen on network errors and HTTP 5xx.
-- In `Failed` / `OnFailed`, you can override `r.Error.IsRetriable` and `r.Error.RetryDelay`.
+If you leave everything at defaults and set `MaxAttempts > 1`, `httpcall` will:
+
+- retry failed requests automatically;
+- obey common rate-limiting headers automatically (up to a bounded sleep duration);
+- expose the computed delay so you can also use it externally for throttling.
+
+You can read `r.RateLimitDelay` to throttle future requests; this field is computed even after a successful response.
+
+
+#### When does `httpcall` retry?
+
+`Do()` retries only when all of these are true:
+
+- the last attempt produced an error (`r.Error != nil`);
+- `r.Error.IsRetriable` is true (by default, this means network errors, HTTP 5xx and HTTP 429);
+- `r.Attempts < r.MaxAttempts`.
+
+HTTP 429 (Too Many Requests) is retriable even for non-idempotent methods
+(POST/PUT/PATCH/DELETE), because the server is telling you it did not accept the
+request due to throttling. HTTP 5xx is not, because we do not know if the server
+started executing the request before failing.
+
+
+#### How does retry delay work?
+
+- When an error response is encountered, `r.ParseErrorResponse` hook is called to populate `r.Error` details; it can set `r.Error.RetryDelay` among other fields. Note that if you set a non-zero retry delay at this stage, it will be used without any further adjustments.
+- After each attempt finishes, `httpcall` computes `r.RateLimitDelay` using `r.ComputeRateLimitDelay` hook (defaults to `httpcall.ComputeDefaultRateLimitDelay`).
+- If `r.Error.RetryDelay` is still zero, it will be initialized to `r.RateLimitDelay` or `r.RetryDelay` or `httpcall.DefaultRetryDelay`, whichever is non-zero. This is where rate limit delay gets applied.
+- Then `Failed` hook runs, and it is free to adjust both `r.Error.IsRetriable` and `r.Error.RetryDelay`.
+- If the error is non-retriable, or max attempts have been reached, or the resulting `r.Error.RetryDelay` is more than `r.MaxAllowedDelay` (defaults to `httpcall.DefaultMaxAllowedDelay` = 65s), `Do()` returns the error immediately without sleeping or retrying.
+- Otherwise, `Do()` sleeps for `r.Error.RetryDelay` and retries.
+
+
+#### How rate limiting is detected
+
+`ComputeDefaultRateLimitDelay` treats a response as rate-limited when either:
+
+- status is HTTP 429, or
+- `RateLimit-Remaining` / `X-RateLimit-Remaining` / `X-Ratelimit-Remaining` is present and equals `0`.
+
+The second case is important: many APIs indicate “you are out of quota” via remaining=0 without returning 429, and sometimes without providing a retry time. In that situation, `httpcall` still sets `r.RateLimitDelay` to a non-zero value:
+
+- It uses `Retry-After` or `X-RateLimit-Reset*` headers when available.
+- If no usable reset information is present, it falls back to a conservative delay (`r.RateLimitFallbackDelay`, default `httpcall.DefaultRateLimitFallbackDelay` = 1m).
+
+This means you can safely throttle future work after a successful call by checking `r.RateLimitDelay`, if you want to.
+
+
+#### Using the delay externally
+
+The same rate-limit computation powers three useful patterns:
+
+1. **Built-in retries**: `Do()` uses `r.Error.RetryDelay` (which defaults to `r.RateLimitDelay`) when retrying.
+2. **External rescheduling on errors**: if you run with `MaxAttempts=1` or ran out of attempts, you can still read the suggested delay from the returned `*httpcall.Error` (`RetryDelay`) and reschedule your job accordingly.
+3. **Throttling after success**: `r.RateLimitDelay` is computed even when `Do()` succeeds, so you can optionally slow down the next request when you run out of quota.
+
+
+#### Example: exponential backoff
+
+You can implement your own backoff policy using `OnFailed`:
+
+```go
+delays := time.Duration{time.Second, 4*time.Second, 16*time.Second, 1*time.Minute}
+
+r.OnFailed(func(r *httpcall.Request) {
+	next := delays[min(r.Attempts-1, len(delays)-1)]
+	r.Error.RetryDelay = max(next, r.RateLimitDelay)
+})
+```
+
+#### Rate limiting adjustments
+
+- Disable rate-limit delay computation: `r.ComputeRateLimitDelay = httpcall.NoRateLimitDelay`.
+- Replace it completely: set `r.ComputeRateLimitDelay` to your own function.
+- Tune rate-limit parsing: `MinRateLimitDelay`, `RateLimitExtraBuffer` (a clock skew buffer added to server-reported time), `RateLimitFallbackDelay` (a delay to use when server doesn't provide a usable one), `MaxAllowedDelay`.
+
 
 ### Composable configuration
 

@@ -6,6 +6,7 @@
 //   - Automatic JSON request/response handling for the common case.
 //   - A safety response-size limit (to avoid accidentally downloading huge payloads).
 //   - Built-in retry loop (network errors + HTTP 5xx) with pluggable policy.
+//   - Rate-limit aware retry delays (HTTP 429 and common X-RateLimit-* headers).
 //
 // The key design feature is composable configuration.
 //
@@ -158,6 +159,60 @@ type Request struct {
 	// LastRetryDelay records the most recent delay actually used between
 	// attempts.
 	LastRetryDelay time.Duration
+
+	// ComputeRateLimitDelay computes a retry delay based on rate-limit response
+	// headers.
+	//
+	// This hook is intentionally NOT composable: setting it overrides all
+	// previous behavior. Set it to a no-op function that returns 0 to disable
+	// rate-limit delay handling entirely -- you can use [NoRateLimitDelay] as
+	// such a function.
+	//
+	// If nil, ComputeDefaultRateLimitDelay is used.
+	ComputeRateLimitDelay func(r *Request) time.Duration
+
+	// MinRateLimitDelay controls the minimum delay returned by
+	// ComputeDefaultRateLimitDelay for rate-limited responses.
+	//
+	// If zero, DefaultMinRateLimitDelay is used.
+	MinRateLimitDelay time.Duration
+
+	// RateLimitExtraBuffer is added to header-derived delays returned by
+	// ComputeDefaultRateLimitDelay.
+	//
+	// This is a pragmatic clock-skew / timing buffer. Since 0 means "use the
+	// default" (DefaultRateLimitExtraBuffer), set this to 1ns to effectively
+	// disable the buffer.
+	RateLimitExtraBuffer time.Duration
+
+	// RateLimitFallbackDelay is used by ComputeDefaultRateLimitDelay when a
+	// response appears to be rate-limited but doesn't provide a usable reset
+	// time via headers.
+	//
+	// Why not just use MinRateLimitDelay? MinRateLimitDelay is a *floor* for
+	// computed, i.e. server-provided delays. When the call is clearly
+	// rate-limited but the server doesn't provide a concrete retry time,
+	// blindly retrying after MinRateLimitDelay (often 1s) results in us
+	// hammering the server in a tight loop. RateLimitFallbackDelay provides a
+	// conservative backoff for the "no usable headers" case.
+	//
+	// Since 0 means "use the default" (DefaultRateLimitFallbackDelay), set this
+	// to 1ns to effectively disable the fallback (i.e. make it not exceed
+	// MinRateLimitDelay). Note that MinRateLimitDelay still applies as a floor.
+	RateLimitFallbackDelay time.Duration
+
+	// RateLimitDelay is the computed rate-limit delay from the last attempt.
+	// It is set right after the HTTP round-trip completes (after doOnce, before
+	// Failed hooks and retry decisions).
+	RateLimitDelay time.Duration
+
+	// MaxAllowedDelay is an upper bound for retry sleeps.
+	//
+	// If a computed delay exceeds this value, Do() returns the error without
+	// sleeping/retrying.
+	//
+	// If zero, DefaultMaxAllowedDelay is used.
+	MaxAllowedDelay time.Duration
 
 	// ShouldStart is called right before each attempt. Returning an error
 	// aborts the call and Do returns an *Error wrapping it.
@@ -460,10 +515,24 @@ func (r *Request) Init() {
 
 // Do executes the HTTP request with optional retries.
 //
-// Retries happen only when Error.IsRetriable is true and Attempts <
-// MaxAttempts. By default, we retry 5xx responses and network errors. The sleep
-// between attempts is taken from Error.RetryDelay, then Request.RetryDelay,
-// then DefaultRetryDelay.
+// Retries happen only when Error.IsRetriable is true and Attempts < MaxAttempts.
+//
+// By default, httpcall marks these as retriable:
+//
+//   - network errors (no response received)
+//   - HTTP 5xx responses
+//   - HTTP 429 (Too Many Requests)
+//
+// Delay selection:
+//
+//  1. Error.RetryDelay (if already set)
+//  2. RateLimitDelay (computed from response headers; see ComputeRateLimitDelay)
+//  3. Request.RetryDelay
+//  4. DefaultRetryDelay
+//
+// Before sleeping, Do enforces MaxAllowedDelay (default: DefaultMaxAllowedDelay).
+// If the selected delay exceeds this value, Do returns the error without
+// sleeping/retrying.
 //
 // The returned error, if any, is always *Error.
 func (r *Request) Do() error {
@@ -490,21 +559,39 @@ func (r *Request) Do() error {
 		r.Error = r.doOnce()
 		r.Duration = time.Since(start)
 
+		computeRateLimitDelay := r.ComputeRateLimitDelay
+		if computeRateLimitDelay == nil {
+			computeRateLimitDelay = ComputeDefaultRateLimitDelay
+		}
+		r.RateLimitDelay = computeRateLimitDelay(r)
+
+		if r.Error != nil && r.Error.RetryDelay == 0 {
+			if r.RateLimitDelay > 0 {
+				r.Error.RetryDelay = r.RateLimitDelay
+			} else if r.RetryDelay != 0 {
+				r.Error.RetryDelay = r.RetryDelay
+			} else {
+				r.Error.RetryDelay = DefaultRetryDelay
+			}
+		}
+
 		if r.Error != nil && r.Failed != nil {
 			r.Failed(r)
 		}
 		if r.Error == nil || !r.Error.IsRetriable || r.Attempts >= r.MaxAttempts {
 			break
 		}
-		delay := r.Error.RetryDelay
-		if delay == 0 {
-			delay = r.RetryDelay
+
+		maxAllowedDelay := r.MaxAllowedDelay
+		if maxAllowedDelay == 0 {
+			maxAllowedDelay = DefaultMaxAllowedDelay
 		}
-		if delay == 0 {
-			delay = DefaultRetryDelay
+		if maxAllowedDelay > 0 && r.Error.RetryDelay > maxAllowedDelay {
+			break
 		}
-		r.LastRetryDelay = delay
-		sleep(r.Context, delay)
+
+		r.LastRetryDelay = r.Error.RetryDelay
+		sleep(r.Context, r.Error.RetryDelay)
 	}
 
 	if r.Finished != nil {
@@ -602,7 +689,7 @@ func (r *Request) doOnce() *Error {
 		r.Error = &Error{
 			CallID:            r.CallID,
 			StatusCode:        resp.StatusCode,
-			IsRetriable:       (resp.StatusCode >= 500 && resp.StatusCode <= 599),
+			IsRetriable:       (resp.StatusCode >= 500 && resp.StatusCode <= 599) || resp.StatusCode == http.StatusTooManyRequests,
 			RawResponseBody:   r.RawResponseBody,
 			PrintResponseBody: true,
 		}

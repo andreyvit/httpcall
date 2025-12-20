@@ -54,7 +54,14 @@ type Error struct {
 	IsRetriable bool
 
 	// RetryDelay optionally overrides the delay before the next retry attempt.
-	// If zero, Request.RetryDelay / DefaultRetryDelay is used.
+	//
+	// In Do(), RetryDelay is initialized before calling Request.Failed (if it was
+	// still zero), so Failed hooks can read and adjust it. The default
+	// initialization order is:
+	//
+	//   1. Request.RateLimitDelay (computed from headers)
+	//   2. Request.RetryDelay
+	//   3. DefaultRetryDelay
 	RetryDelay time.Duration
 
 	// StatusCode is the HTTP status code, or 0 if a response was never received.

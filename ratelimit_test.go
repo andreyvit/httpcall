@@ -162,6 +162,36 @@ func TestComputeDefaultRateLimitDelay_retryAfterRFC1123Z(t *testing.T) {
 	}
 }
 
+func TestComputeDefaultRateLimitDelay_ietfRateLimitHeaders(t *testing.T) {
+	h := http.Header{}
+	h.Set("RateLimit-Remaining", "0")
+	h.Set("RateLimit-Reset", "9")
+	resp := &http.Response{
+		StatusCode: 429,
+		Header:     h,
+	}
+	got := computeDefaultRateLimitDelay(resp, rateLimitBaseTime, DefaultMinRateLimitDelay, DefaultRateLimitExtraBuffer, DefaultRateLimitFallbackDelay)
+	want := 10 * time.Second
+	if got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestComputeDefaultRateLimitDelay_retryAfterOverridesResetHeader(t *testing.T) {
+	h := http.Header{}
+	h.Set("Retry-After", "7")
+	h.Set("RateLimit-Reset", "30")
+	resp := &http.Response{
+		StatusCode: 429,
+		Header:     h,
+	}
+	got := computeDefaultRateLimitDelay(resp, rateLimitBaseTime, DefaultMinRateLimitDelay, DefaultRateLimitExtraBuffer, DefaultRateLimitFallbackDelay)
+	want := 8 * time.Second
+	if got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
 func TestComputeDefaultRateLimitDelay_resetAfterDeltaSeconds(t *testing.T) {
 	h := http.Header{}
 	h.Set("X-RateLimit-Reset-After", "30")

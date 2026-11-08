@@ -39,24 +39,40 @@ Installation:
 go get github.com/andreyvit/httpcall@latest
 ```
 
-Basic usage:
+Requires Go 1.22 or newer. This complete example uses a local test server and a deadline covering all attempts:
 
 ```go
-var out SomeResponse
-r := &httpcall.Request{
-	CallID:    "ListWidgets",
-	Method:    http.MethodGet,
-	BaseURL:   "https://api.example.com",
-	Path:      "/v1/widgets",
-	QueryParams: url.Values{
-		"limit": {"100"},
-	},
-	OutputPtr:   &out,
-	MaxAttempts: 3,
-}
-err := r.Do()
-if err != nil {
-	return err
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"time"
+
+	"github.com/andreyvit/httpcall"
+)
+
+func main() {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"answer":42}`)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var out struct {
+		Answer int `json:"answer"`
+	}
+	r := &httpcall.Request{
+		Context: ctx, CallID: "GetAnswer", Method: http.MethodGet,
+		BaseURL: server.URL, Path: "/", OutputPtr: &out, MaxAttempts: 3,
+	}
+	if err := r.Do(); err != nil {
+		panic(err)
+	}
+	fmt.Println(out.Answer) // 42
 }
 ```
 
@@ -76,7 +92,7 @@ func (app *MyApp) ConfigureHTTPRequest(r *httpcall.Request) {
 	}
 
 	r.OnStarted(func(r *httpcall.Request) {
-		log.Printf("%s: %s %s", r.CallID, r.Method, r.Curl())
+		log.Printf("%s: %s", r.CallID, r.Method)
 	})
 
 	r.OnFinished(func(r *httpcall.Request) {
@@ -400,9 +416,11 @@ Example:
 ```go
 if err := r.Do(); err != nil {
 	e := err.(*httpcall.Error)
-	log.Printf("%s -> %s (retry=%v) curl=%s", r.CallID, e.Error(), e.RetryDelay, r.Curl())
+	log.Printf("%s -> HTTP %d (retry=%v)", r.CallID, e.StatusCode, e.RetryDelay)
 }
 ```
+
+`Curl()` includes request headers and body without redaction, including credentials. Keep it out of routine logs. Enable retries for POST or other side effects only when the API provides idempotency or duplicate execution is acceptable; use `MaxAttempts: 1` otherwise.
 
 Be mindful of secrets: if responses can contain credentials/PII, you may want to set `e.PrintResponseBody = false` in `ParseErrorResponse` or `Failed`.
 
@@ -443,14 +461,11 @@ r.OnFinished(func(r *httpcall.Request) {
 
 Set `MaxAttempts` to more than 1 to enable automatic retries. Set `RetryDelay` to adjust the delay between retries, or use `OnFailed` hook for custom retry logic.
 
-`Do()` retries a failed request (`r.Error != nil`) if `r.Error.IsRetriable` is true (by default, this means network errors, HTTP 5xx and HTTP 429), and `r.Attempts < r.MaxAttempts`. By default, `IsRetriable` is set to true for network errors, HTTP 5xx on idempotent requests, and HTTP 429.
+`Do()` retries a failed request (`r.Error != nil`) if `r.Error.IsRetriable` is true (by default, this means network errors, HTTP 5xx and HTTP 429), and `r.Attempts < r.MaxAttempts`. By default, `IsRetriable` is set to true for network errors, HTTP 5xx on any HTTP method, and HTTP 429.
 
-HTTP 429 (Too Many Requests) is retriable even for non-idempotent methods
-(POST/PUT/PATCH/DELETE), because the server is telling you it did not accept the
-request due to throttling. HTTP 5xx is not, because we do not know if the server
-started executing the request before failing.
+HTTP 5xx and HTTP 429 can trigger retries for any method, including POST. A failed response does not prove the server skipped the operation. Enable retries only when repeating the request is safe, such as with an API-supported idempotency key. Otherwise keep `MaxAttempts` at 1.
 
-You can adjust which requests are retried and the delays used by setting `r.IsRetriable` in a `Failed` hook.
+You can adjust which requests are retried and the delays used by setting `r.Error.IsRetriable` in a `Failed` hook.
 
 Retry timeline:
 
@@ -502,7 +517,7 @@ r.OnFailed(func(r *httpcall.Request) {
 
 ### Debugging with `curl`
 
-`r.Curl()` formats the request as a runnable curl command. You can log this to make debugging easier.
+`r.Curl()` formats the request as a runnable curl command. It includes headers and request bodies without redaction. Use only for controlled debugging after checking for credentials and private data.
 
 
 ### Response size limit
